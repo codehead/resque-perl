@@ -1,8 +1,8 @@
 use Test::More;
 use Resque;
 use lib 't/lib';
+
 use Test::SpawnRedisServer;
- 
 my ($c, $server) = redis();
 END { $c->() if $c }
 
@@ -12,9 +12,19 @@ ok ( $r->redis->ping, 'Redis object is alive' );
 
 $r->flush_namespace;
 
+# create and remove empty queue
+{
+    $r->create_queue( "test" );
+    ok( my @queues = $r->queues, 'Get queues');
+    ok( @queues == 1, 'Create a queue' );
+    $r->remove_queue( "test" );
+    @queues = $r->queues;
+    ok( @queues == 0, 'Remove a queue' );
+}
+
 # push
 push_jobs($r);
-is( $r->size('test'), 2, 'Test queue has two jobs'); 
+is( $r->size('test'), 2, 'Test queue has two jobs');
 
 { # peek jobs
     ok( my @jobs = $r->peek('test', 0, -1), 'peek() all test items');
@@ -33,9 +43,9 @@ is( $r->size('test'), 2, 'Test queue has two jobs');
     is( $queues[0], 'test', 'Queue name is test');
 }
 
-{  # pop 
+{  # pop
     ok( my $job = $r->pop('test'), 'Pop a job from the test queue' );
-    is( $r->size('test'), 1, 'Test queue has one job left'); 
+    is( $r->size('test'), 1, 'Test queue has one job left');
     isa_ok( $job, 'Resque::Job' );
     is( $job->args->[0], 1, 'Job argument looks good' );
     is( $job->queue, 'test', "Job known about it's queue" );

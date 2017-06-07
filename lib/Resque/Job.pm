@@ -1,14 +1,16 @@
 package Resque::Job;
+# ABSTRACT: Resque job container
+
 use Moose;
 use Moose::Util::TypeConstraints;
 with 'Resque::Encoder';
-
-# ABSTRACT: Resque job container
 
 use overload '""' => \&stringify;
 use Class::Load qw(load_class);
 
 =attr resque
+
+Provides 'redis' method, which provides access to our redis subsystem.
 
 =cut
 has resque  => (
@@ -35,14 +37,14 @@ has worker  => (
 Class to be performed by this job.
 
 =cut
-has class   => ( is => 'rw', lazy => 1, default => sub { confess "This job needs a class to do some work." } );
+has class => ( is => 'rw', lazy => 1, default => sub { confess "This job needs a class to do some work." } );
 
 =attr queue
 
 Name of the queue this job is or should be.
 
 =cut
-has queue   => (
+has queue => (
     is        => 'rw', lazy => 1,
     default   => \&queue_from_class,
     predicate => 'queued'
@@ -53,7 +55,7 @@ has queue   => (
 Array of arguments for this job.
 
 =cut
-has args    => ( is => 'rw', isa => 'ArrayRef', default => sub {[]} );
+has args => ( is => 'rw', isa => 'ArrayRef', default => sub {[]} );
 
 =attr payload
 
@@ -67,24 +69,19 @@ coerce 'HashRef'
     => from 'Str'
     => via { JSON->new->utf8->decode($_) };
 has payload => (
-    is   => 'ro',
-    isa  => 'HashRef',
-    coerce => 1,
-    lazy => 1,
-    default => sub {{
-        class => $_[0]->class,
-        args  => $_[0]->args
-    }},
-    trigger => sub {
-        my ( $self, $hr ) = @_;
-        $self->class( $hr->{class} );
-        $self->args( $hr->{args} ) if $hr->{args};
-    }
+    is      => 'ro',
+    isa     => 'HashRef',
+    coerce  => 1,
+    lazy    => 1,
+    builder => 'payload_builder',
+    trigger => \&_payload_trigger
 );
 
 =method encode
 
 String representation(JSON) to be used on the backend.
+
+    $job->encode();
 
 =cut
 sub encode {
@@ -93,6 +90,12 @@ sub encode {
 }
 
 =method stringify
+
+Returns a string version of the job, like
+
+'(Job{queue_name) | ClassName | args_encoded)'
+
+    my $stringified = $job->stringify();
 
 =cut
 sub stringify {
@@ -107,6 +110,8 @@ sub stringify {
 =method queue_from_class
 
 Normalize class name to be used as queue name.
+
+    my $queue_name = $job->queue_from_class();
 
     NOTE: future versions will try to get the
           queue name from the real class attr
@@ -125,6 +130,8 @@ sub queue_from_class {
 Load job class and call perform() on it.
 This job object will be passed as the only argument.
 
+    $job->perform();
+
 =cut
 sub perform {
     my $self = shift;
@@ -141,6 +148,8 @@ sub perform {
 Add this job to resque.
 See Rescue::push().
 
+    $job->enqueue();
+
 =cut
 sub enqueue {
     my $self = shift;
@@ -156,6 +165,8 @@ object queue, class and args.
 
 See Resque::mass_dequeue() for massive destruction.
 
+    $job->enqueue();
+
 =cut
 sub dequeue {
     my $self = shift;
@@ -168,7 +179,10 @@ sub dequeue {
 
 =method fail
 
-Store a failure on this job.
+Store a failure (or exception and failure) on this job.
+
+    $job->fail( "error message'); # or
+    $job->fail( ['exception', 'error message'] );
 
 =cut
 sub fail {
@@ -188,5 +202,33 @@ sub fail {
         error     => $error
     );
 }
+
+=method payload_builder
+
+Default payload builder method. This method is public only to be wrapped in the
+context of plugins that adds attributes to this class.
+
+=cut
+sub payload_builder {+{
+    class => $_[0]->class,
+    args  => $_[0]->args
+}}
+
+=method payload_reader
+
+Default payload trigger method. This method is public only to be wrapped in the
+context of plugins that adds attributes to this class.
+
+This mehtod is only called at construction time to populate job class and args
+attributes from payload.
+
+=cut
+sub payload_reader {
+    my ( $self, $hr ) = @_;
+    $self->class( $hr->{class} );
+    $self->args( $hr->{args} ) if $hr->{args};
+}
+
+sub _payload_trigger { shift->payload_reader(@_) }
 
 __PACKAGE__->meta->make_immutable();

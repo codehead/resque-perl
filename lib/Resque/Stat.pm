@@ -1,7 +1,7 @@
 package Resque::Stat;
-use Moose;
-
 # ABSTRACT: The stat subsystem. Used to keep track of integer counts.
+
+use Moose;
 
 =attr resque
 =cut
@@ -15,6 +15,8 @@ has resque => (
 
 Returns the int value of a stat, given a string stat name.
 
+my $value = $resque_stat->get( 'stat_name' );
+
 =cut
 sub get {
     my ($self, $stat) = @_;
@@ -24,9 +26,11 @@ sub get {
 =method incr
 
 For a string stat name, increments the stat by one.
- 
+
 Can optionally accept a second int parameter. The stat is then
 incremented by that amount.
+
+my $value = $resque_stat->incr( 'stat_name', $optional_inc_by );
 
 =cut
 sub incr {
@@ -38,9 +42,11 @@ sub incr {
 =method decr
 
 For a string stat name, decrements the stat by one.
- 
+
 Can optionally accept a second int parameter. The stat is then
 decremented by that amount.
+
+my $value = $resque_stat->decr( 'stat_name', $optional_dec_by );
 
 =cut
 sub decr {
@@ -52,6 +58,8 @@ sub decr {
 =method clear
 
 Removes a stat from Redis, effectively setting it to 0.
+
+$resque_stat->clear( 'stat_name' );
 
 =cut
 sub clear {

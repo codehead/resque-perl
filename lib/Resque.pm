@@ -1,16 +1,18 @@
 package Resque;
+# ABSTRACT: Redis-backed library for creating background jobs, placing them on multiple queues, and processing them later.
+
 use Moose;
 use Scalar::Util 'blessed';
 use Moose::Util::TypeConstraints;
+use Class::Load;
 use Data::Compare;
 with 'Resque::Pluggable';
 
-# ABSTRACT: Redis-backed library for creating background jobs, placing them on multiple queues, and processing them later.
-
-use Redis;
 use Resque::Job;
 use Resque::Worker;
 use Resque::Failures;
+
+sub _redis_class{ Class::Load::load_first_existing_class( 'Redis::Fast', 'Redis' ) }
 
 =head1 SYNOPSIS
 
@@ -77,28 +79,29 @@ A lot more about Resque can be read on the original blog post: L<http://github.c
 
 =attr redis
 
-Redis instance for this Resque instance.
-Accept a Redis object or string. When a string is
-passed in, it will be used as Redis server argument.
+Redis instance for this Resque instance. Accepts a string, L<Redis>, L<Redis::Fast> or any other object that behaves like those.
+
+When a string is passed in, it will be used as the server argument of a new client object. When L<Redis::Fast> is available this
+will be used, when not the pure perl L<Redis> client will be used instead.
 
 =cut
-subtype 'Sugar::Redis'
-    => as class_type('Redis');
-coerce 'Sugar::Redis'
-    => from 'Str'
-    => via { Redis->new(
+
+subtype 'Sugar::Redis' => as 'Object';
+coerce 'Sugar::Redis' => from 'Str' => via {
+    _redis_class->new(
         server    => $_,
         reconnect => 60,
         every     => 250,
         encoding  => undef
-    )};
+    )
+};
 
 has redis => (
     is      => 'ro',
     lazy    => 1,
     coerce  => 1,
     isa     => 'Sugar::Redis',
-    default => sub { Redis->new }
+    default => sub { _redis_class->new }
 );
 
 =attr namespace
@@ -122,17 +125,18 @@ has failures => (
     handles => [qw/ throw /]
 );
 
-=attr worker
+=method worker
 
-A L<Resque::Worker> on this resque instance.
+Returns a new L<Resque::Worker> on this resque instance.
 It can have plugin/roles applied. See L<Resque::Pluggable>.
 
+    my $worker = $r->worker();
+
 =cut
-has worker => (
-    is      => 'ro',
-    lazy    => 1,
-    default => sub { $_[0]->worker_class->new( resque => $_[0] ) }
-);
+sub worker {
+    my $self = shift;
+    $self->worker_class->new( resque => $self );
+}
 
 =head1 Queue manipulation
 
@@ -165,6 +169,8 @@ Pops a job off a queue. Queue name should be a string.
 
 Returns a Resque::Job object.
 
+    my $resque_job = $r->pop( 'queue_name' );
+
 =cut
 sub pop {
     my ( $self, $queue ) = @_;
@@ -182,6 +188,8 @@ sub pop {
 Returns the size of a queue.
 Queue name should be a string.
 
+    my $size = $r->size();
+
 =cut
 sub size {
     my ( $self, $queue ) = @_;
@@ -190,7 +198,7 @@ sub size {
 
 =method peek
 
-Returns an array of jobs currently queued.
+Returns an array of jobs currently queued, or an arrayref in scalar context.
 
 First argument is queue name and an optional secound and third are
 start and count values that can be used for pagination.
@@ -201,7 +209,8 @@ of count. So, passing -1 will return full list, -2 all but last
 element and so on.
 
 To get the 3rd page of a 30 item, paginatied list one would use:
-    $resque->peek('my_queue', 59, 30)
+
+    my @jobs = $resque->peek('my_queue', 59, 30)
 
 =cut
 sub peek {
@@ -216,7 +225,9 @@ sub peek {
 
 =method queues
 
-Returns an array of all known Resque queues.
+Returns an array of all known Resque queues, or an arrayref in scalar context.
+
+    my @queues = $r->queues();
 
 =cut
 sub queues {
@@ -229,11 +240,25 @@ sub queues {
 
 Given a queue name, completely deletes the queue.
 
+    $r->remove_queue( 'my_queue' );
+
 =cut
 sub remove_queue {
     my ( $self, $queue ) = @_;
     $self->redis->srem( $self->key('queues'), $queue );
     $self->redis->del( $self->key( queue => $queue ) );
+}
+
+=method create_queue
+
+Given a queue name, creates an empty queue.
+
+    $r->create_queue( 'my_queue' );
+
+=cut
+sub create_queue {
+    my ( $self, $queue ) = @_;
+    $self->_watch_queue( $queue );
 }
 
 =method mass_dequeue
@@ -253,14 +278,14 @@ That is, for these two jobs:
 
 The following call will remove both:
 
-    $rescue->mass_dequeue({
+    my $num_removed = $rescue->mass_dequeue({
         queue => 'test',
         class => 'UpdateGraph'
     });
 
 Whereas specifying args will only remove the 2nd job:
 
-    $rescue->mass_dequeue({
+    my $num_removed = $rescue->mass_dequeue({
         queue => 'test',
         class => 'UpdateGraph',
         args  => ['ruby']
@@ -302,6 +327,8 @@ hashref or string(payload for object).
 L<Resque::Job> class can be extended thru roles/plugins.
 See L<Resque::Pluggable>.
 
+    $r->new_job( $job_or_job_hashref );
+
 =cut
 sub new_job {
     my ( $self, $job ) = @_;
@@ -330,8 +357,9 @@ sub key {
 
 =method keys
 
-Returns an array of all known Resque keys in Redis. Redis' KEYS operation
-is O(N) for the keyspace, so be careful - this can be slow for big databases.
+Returns an array of all known Resque keys in Redis, or an arrayref in scalar context.
+Redis' KEYS operation is O(N) for the keyspace, so be careful this can be slow for
+big databases.
 
 =cut
 sub keys {
@@ -345,6 +373,8 @@ sub keys {
 This method will delete every trace of this Resque system on
 the redis() backend.
 
+    $r->flush_namespace();
+
 =cut
 sub flush_namespace {
     my $self = shift;
@@ -357,6 +387,8 @@ sub flush_namespace {
 =method list_range
 
 Does the dirty work of fetching a range of items from a Redis list.
+
+    my $items_ref = $r->list_range( $key, $stat, $count );
 
 =cut
 sub list_range {
@@ -377,7 +409,7 @@ __PACKAGE__->meta->make_immutable();
 
 =head1 BUGS
 
-This is an early release, so probable there are plenty of bugs around.
+As in any piece of software there might be bugs around.
 If you found one, please report it on RT or at the github repo:
 
 L<https://github.com/diegok/resque-perl>
@@ -388,9 +420,7 @@ what you've fixed.
 =head1 TODO
 
 =for :list
-* Improve docs for plugin authors
-* A generic runner for attaching workers to queues.
-* Find a way to test worker fork and signal handling.
+* More tests on worker fork and signal handling.
 
 =head1 SEE ALSO
 

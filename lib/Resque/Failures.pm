@@ -1,8 +1,8 @@
 package Resque::Failures;
-use Moose;
-with 'Resque::Encoder';
 # ABSTRACT: Class for managing Resque failures
 
+use Moose;
+with 'Resque::Encoder';
 use Class::Load qw(load_class);
 use Carp;
 
@@ -40,6 +40,10 @@ has failure_class => (
 
 create() a failure on the failure_class() and save() it.
 
+$failures->throw( %job_description_hash );
+
+See L<Resque> code for a usage example.
+
 =cut
 sub throw {
     my $self = shift;
@@ -51,6 +55,8 @@ sub throw {
 
 Create a new failure on the failure_class() backend.
 
+$failures->create( ... );
+
 =cut
 sub create {
     my $self = shift;
@@ -59,7 +65,9 @@ sub create {
 
 =method count
 
-How many failures was in all the resque system.
+How many failures are in the resque system.
+
+my $count = $failures->count();
 
 =cut
 sub count {
@@ -69,14 +77,16 @@ sub count {
 
 =method all
 
-Return a range of failures in the same way Resque::peek() does for
-jobs.
+Return a range of failures (or an arrayref in scalar context)
+in the same way Resque::peek() does for jobs.
+
+my @failures = $failures->all('my_queue', $opt_start, $opt_count);
 
 =cut
 sub all {
     my ( $self, $start, $count ) = @_;
     my $all = $self->resque->list_range(
-        $self->key('failed'), $start, $count
+        $self->key('failed'), $start||0, $count||-1
     );
     $_ = $self->encoder->decode( $_ ) for @$all;
     return wantarray ? @$all : $all;
@@ -85,6 +95,8 @@ sub all {
 =method clear
 
 Remove all failures.
+
+$failures->clear();
 
 =cut
 sub clear {
@@ -98,6 +110,8 @@ Requeue by index number.
 
 Failure will be updated to note retried date.
 
+$failures->requeue( $index );
+
 =cut
 sub requeue {
     my ( $self, $index ) = @_;
@@ -107,11 +121,12 @@ sub requeue {
         $self->key('failed'), $index,
         $self->encoder->encode($item)
     );
-    $self->resque->push(
-        $item->{queue} => {
-            class => $item->{payload}{class},
-            args  => $item->{payload}{args},
-    });
+    $self->_requeue($item);
+}
+
+sub _requeue {
+    my ( $self, $item, $queue ) = @_;
+    $self->resque->push( $queue || $item->{queue} => $item->{payload} );
 }
 
 =method remove
@@ -123,6 +138,8 @@ sucesive ones will move left, so index will decrese
 one. If you want to remove several ones start removing
 from the rightmost one.
 
+$failures->remove( $index );
+
 =cut
 sub remove {
     my ( $self, $index ) = @_;
@@ -130,6 +147,67 @@ sub remove {
     my $key = $self->key('failed');
     $self->redis->lset( $key, $index, $id);
     $self->redis->lrem( $key, 1, $id );
+}
+
+=method mass_remove
+
+Remove and optionally requeue all or matching failed jobs. Errors that happen
+after this method is fired will remind untouched.
+
+Filters, if present, are useful to select failed jobs and should be regexes or
+strings that will be matched against any of the following failed job field:
+
+    queue: the queue where job had failed
+    class: the job class
+    error: the error string
+    args:  a JSON representation of the job arguments
+
+By default, all matching jobs will be deleted but the ones that
+doesn't match will be placed back at the end of the failed jobs.
+
+The behavior can be modified with the following options:
+
+    requeue: requeue matching jobs after being removed.
+    requeue_to: Requeued jobs will be placed on this queue instead of the original one. This option implies requeue.
+
+Example
+
+    # Remove and requeue all failed jobs from queue 'test_queue' of class My::Job::Class
+    $resque->failures->mass_remove(
+        queue   => 'test_queue',
+        class   => qr/^My::Job::Class$/,
+        requeue => 1
+    );
+
+=cut
+sub mass_remove {
+    my ( $self, %opt ) = @_;
+    $opt{limit} ||= $self->count || return 0;
+
+    for (qw/queue error class args/) { $opt{$_} = qr/$opt{$_}/ if $opt{$_} && not ref $opt{$_} }
+
+    my $key = $self->key('failed');
+    my $enc = $self->encoder;
+
+    my ( $count, $rem ) = ( 0, 0 );
+    while ( my $encoded_item = $self->redis->lpop($key) ) {
+        my $item = $enc->decode($encoded_item);
+
+        my $match = (!$opt{queue} && !$opt{error} && !$opt{class} && !$opt{args})
+                 || (
+                     (!$opt{queue} || $item->{queue} =~ $opt{queue})
+                     && (!$opt{error} || $item->{error} =~ $opt{error})
+                     && (!$opt{class} || $item->{payload}{class} =~ $opt{class})
+                     && (!$opt{args}  || $enc->encode($item->{payload}{args}) =~ $opt{args})
+                 );
+
+        if ( $match ) { $rem++; $self->_requeue($item, $opt{requeue_to}) if $opt{requeue} || $opt{requeue_to} }
+        else          { $self->redis->rpush( $key => $encoded_item ) }
+
+        last if ++$count >= $opt{limit};
+    }
+
+    $rem;
 }
 
 __PACKAGE__->meta->make_immutable();
